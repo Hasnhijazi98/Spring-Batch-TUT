@@ -1,0 +1,8 @@
+com/springbatch/config/BatchConfiguration.class
+com/springbatch/controller/JobController.class
+com/springbatch/reader/ProductNameItemReader.class
+com/springbatch/listener/MyStepListener.class
+com/springbatch/demo/DemoApplication.class
+com/springbatch/Product.class
+com/springbatch/config/BatchConfiguration$1.class
+com/springbatch/processor/ProductProcessor.class
