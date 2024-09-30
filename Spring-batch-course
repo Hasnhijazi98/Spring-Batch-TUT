@@ -1,0 +1,397 @@
+Spring Batch :
+
+
+spring batch principe  ETL - Extract data 
+			   - Trasnform the data to a format
+			   - Load the data to a target
+
+here i'll write the tutorial and what i've achieved step by step :
+*******************************************************************************
+********************SETUP******************************************************
+*******************************************************************************
+-downloaded mysql server and mysql workbench and shell, then added password to it
+-create a schema "batch_schema"
+-create user and grant him all on the schema
+	*create user 'batch_demo' identified by 'batchdemo'
+	*grant all on batch_schema.* to batch_demo
+- got to spring init and generate a project with batch dependancy (and H2 db only for testing purposes)
+- Open the project in an ide (intelliJ in my case)
+
+*******************************************************************************
+********************BATCH SETUP************************************************
+*******************************************************************************
+**********WATCH OUT : THIS IS BATCH V.4****************************************
+
+NOTE : BATCH V.4 IS COMPATIBLE WITH SPRING BOOT V.2
+
+
+-in the pom file, add the batch core v.4.x dependancy
+-in the main  run file, add the batch processing bean - @EnableBatchProcessing
+-initialize a Job and a step builder factories :
+	* StepBuilderFactory
+	* JobBuilderFactory
+and autowire them
+- create a step and inside make a return step for a takslet and  a execution of this step, then finish by .build() to build the step instructions :
+		return this.stepBuilderFac.get("step name").takslet(new Tasklet() {
+									execute method
+								})
+
+- create a job - public Job job() {
+		 		return jobBuilderFac.get("job name")
+		 		.start(step_name())
+		 		.build();	
+		 	}
+
+-Now add the configuration of the jdbc to connect to the mysql database and add the dependancy in the POM file:
+
+spring.datasource.url=jdbc:mysql://localhost:3306/batch_schema
+spring.datasource.username=root
+spring.datasource.password=root
+spring.datasource.platform=mysql
+spring.batch.jdbc.initialize-schema=always
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+Now to run a proper batch project, create a new package under java directory and name it com.springbatch.config and create a class named BatchConfig
+-and then copy all the job and step building code from the main file to this class, don't forget the @EnableBatchProcessing and add also @Configuration to make this class available for component scanning
+
+- now let's build a rest controller to call the job from the configuration:
+	- create a new package and a new class 'JobController'
+	- declare the jobLaunher and a job, then create a endpoint with a @GetMapping, the code will look like this initially :
+	    @Autowired
+	    private JobLauncher jobLauncher;
+
+	    @Autowired
+	    @Qualifier("firstJob")
+	    private Job job;
+
+	    @GetMapping("/launch3aw/{id}")
+	    public void handle(@PathVariable("id") String id) throws Exception{
+
+	    JobParameters jobParameters = new JobParametersBuilder().addString("param",id).toJobParameters();
+	    jobLauncher.run(job, jobParameters);
+	    }
+
+	- don't forget the @Qualifier to add inside the name of the job of the bean from the configuration file
+	- the app may not scan the code from other packages, if so use scan base - @SpringBootApplication(scanBasePackages={com.springbatch.controller,...})
+	-run the app, and test the api (loclahost:8080/launch3aw/1), the job is then executed and the instance is created, if we change the id, the job will not restart entirely, only create other instance having other id.
+
+
+-NOW, how can we have a job with multiple steps ?
+----> simply just copy paste the function of the first step and change its name, like "2nd Step" and add it to the same job where the previous step was added, and use the .next
+
+example :     public Job firstJob(){
+		return this.jobBuilderFactory.get("1st job!!").start(firstStep()).next(secondStep()).next(thirdStep()).build();
+	      }
+	      
+if a step fails, we can fix the eroor on the step and then restart the same job instace (having same id), the job will restart from the step that has failed, the
+succesful steps will not be restarted
+- to prevent restarting a job, we can add .prevent Restart() in the jobBuilder function :  return this.jobBuilder.get("").preventRestart().start...
+
+- we can even do a conditional flow of sequences, try that :
+
+public Job firstJob(){
+        return this.jobBuilderFactory.get("1st job!!")
+                .start(firstStep())
+                .on("COMPLETED").to(secondStep())
+                .from(firstStep())
+                    .on("FAILED").to(thirdStep())
+                .end()
+                .build();
+    }
+
+here, the condditions are in the .on(), if step 1 fails in runs step 3 and if step 1 is compoleted it executes step 2
+NOTE: if a step fails and it goes to another step, it is stored as a "ABONDONED" step in the database, so if we try to restart the job, the "ABONDONED" step doesn't restart
+	    
+	        
+TO do a custom exit status, we can use either : -StepExecution Listenr  OR JobExecutionDecider
+one takes effect on the exit status of a step or the instructions of a step, the other takes effect on the general flow between the steps
+
+
+********************************************************************
+********************BATCH CHUNK PROCESSING**************************
+********************************************************************
+
+THE CHUNK PROCESSING IS FROM 3 STEPS :
+-READING
+-PROCESSING
+-WRITING
+
+****************************READING*********************************
+
+we will try 2 scenarios : 
+	- create a simple custom reader
+		- create a new package --> new class and implement the ItemReader interface, and then implement your logic
+		- code ewample of a simple data chunk processing : 
+		
+		package com.springbatch.reader;
+		import org.springframework.batch.item.ItemReader;
+		import org.springframework.batch.item.NonTransientResourceException;
+		import org.springframework.batch.item.ParseException;
+		import org.springframework.batch.item.UnexpectedInputException;
+		import java.util.Iterator;
+		import java.util.List;
+		public class ProductItemReader implements ItemReader {
+
+		    private Iterator<String> productListIterator;
+		    public ProductItemReader(List<String> productList) {
+			this.productListIterator = productList.iterator();
+		    }
+		    @Override
+		    public String read() throws Exception, UnexpectedInputException, ParseException, NonTransientResourceException {
+			return this.productListIterator.hasNext() ? this.productListIterator.next() : null;
+		    }
+		}
+
+		and then in the config file, create a small list and then modify the step :
+		
+		    @Bean
+		    public ItemReader<String> itemReader() {
+			List<String> productList = new ArrayList<>();
+			productList.add("Product 1");
+			productList.add("Product 2");
+			productList.add("Product 3");
+			productList.add("Product 4");
+			productList.add("Product 5");
+			productList.add("Product 6");
+			productList.add("Product 7");
+			productList.add("Product 8");
+			return new ProductNameItemReader(productList);
+		    }
+
+		    @Bean
+		    public Step step1() {
+			return this.stepBuilderFactory.get("chunkBasedStep1")
+				.<String,String>chunk(3)  /// here we will be processing chunks having 3 records each
+				.reader(itemReader())   // reading using the item reader we developed
+				.writer(new ItemWriter<String>() { a new writer for each chunk
+
+				    @Override
+				    public void write(List<? extends String> items) throws Exception {
+				        System.out.println("Chunk-processing Started");
+				        items.forEach(System.out::println);
+				        System.out.println("Chunk-processing Ended");
+				    }
+				}).build();
+		    }
+
+	- developping a database metadata reader
+
+
+********************READING FROM A FILEµ******************************************
+
+you have FlatItemReaders,FlatItemWriters,JSONItemReader,JSONItemWriter...etc
+
+each one for a specific use, in our case in a excel file, we'll use a FlatItem materials
+
+search online for it and modify the headers and the name and the directory to the source file according to your code/file content and add it to the bacthc Config file
+
+and MOST IMPORTANT, create a object class (POJO) that have fields corresponding to the headers of the csv files
+
+example : 
+
+    @Bean
+    public FlatFileItemReader<Product> itemReader() {
+        return new FlatFileItemReaderBuilder<Product>()
+                .name("productItemReader")
+                .resource(new ClassPathResource("Product_Details.csv"))  // CSV file location
+                .linesToSkip(1) // Skip the header row
+                .delimited()
+                .names("product_id", "product_name", "product_category", "product_price")  // CSV column names
+                .fieldSetMapper(new BeanWrapperFieldSetMapper<>() {{
+                    setTargetType(Product.class);
+                }})
+                .build();
+    }
+
+    @Bean
+    public ItemWriter<Product> itemWriter() {
+        return items -> {
+            System.out.println("Writing products...");
+            for (Product product : items) {
+                System.out.println(product.getProductName());
+            }
+        };
+    }
+ et puis on les ajoutes normalement dans le step  : ....   .reader(itemReader())
+ 							   .writer(itemWriter()) ...
+
+*********************READING FROM DATABASE*****************************************
+
+Same as the reading from a file, create a POJO that have fields corresponding to the headers of the METADATA headers
+
+ensure the connection to the database in .properties file :
+in our case it's the following
+	spring.datasource.url=jdbc:mysql://localhost:3306/batch_schema
+	spring.datasource.username=root
+	spring.datasource.password=root
+	spring.datasource.platform=mysql
+	spring.batch.jdbc.initialize-schema=always
+	spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+	spring.batch.job.enable=false
+	
+and declare a datasource in the batch configuration and a jobcursorItemReader having a JdbcCursorItemReader :
+
+	@Autowired
+	    public DataSource dataSource;
+
+
+	    @Bean
+	    public JdbcCursorItemReader<Product> jdbcItemReader() {
+		return new JdbcCursorItemReaderBuilder<Product>()
+		        .name("productItemReader")
+		        .dataSource(dataSource)
+		        .sql("SELECT PRODUCT_ID, PRODUCT_NAME, PRODUCT_CATEGORY, PRODUCT_PRICE FROM PRODUCT_DETAILS")
+		        .rowMapper((rs, rowNum) -> {
+		            Product product = new Product();
+		            product.setProductId(rs.getString("PRODUCT_ID"));
+		            product.setProductName(rs.getString("PRODUCT_NAME"));
+		            product.setProductCategory(rs.getString("PRODUCT_CATEGORY"));
+		            product.setProductPrice(rs.getDouble("PRODUCT_PRICE"));
+		            return product;
+		        })
+		        .build();
+	    }
+
+and then add the reader to the step introduced in the job
+
+****************************WRTITING TO FILES/DB************************************
+
+
+TO A FILE :
+- specify a FileSystemResource (destination of the file to write in / to create)
+- put a delimiter according to the file you are creating (example : if csv file put a comma ' / if txt put spaces...)
+- after creating the writer, add it in the steps (as all the readers and writers)
+
+example : 
+
+    @Bean
+    public FlatFileItemWriter<Product> CSVitemWriter() {
+        return new FlatFileItemWriterBuilder<Product>()
+                .name("productItemWriter")
+                .resource(new FileSystemResource("src/main/resources/Output_Product_Details.csv")) // Output file location
+                .delimited()
+                .delimiter(",") // CSV delimiter
+                .names("productId", "productName", "productCategory", "productPrice") // Field names to be written in the file
+                .headerCallback(writer -> writer.write("Product ID,Product Name,Product Category,Product Price")) // Adding header
+                .build();
+    }
+
+TO A DB :
+-ensure the class POJO, the properties of the connection are good (as usual)
+-ensure the table is created already, with the corresponding field, as spring batch writers does not create tables in the METADATA
+- create a JDBCBatchItemWriter, and fill in the sql query, the class to fill ... 
+example:
+    @Bean
+    public JdbcBatchItemWriter<Product> jdbcItemWriter() {
+        return new JdbcBatchItemWriterBuilder<Product>()
+                .itemSqlParameterSourceProvider(new BeanPropertyItemSqlParameterSourceProvider<>())
+                .sql("INSERT INTO WRITTEN_PRODUCTS (PRODUCT_ID, PRODUCT_NAME, PRODUCT_CATEGORY, PRODUCT_PRICE) VALUES (:productId, :productName, :productCategory, :productPrice)")
+                .dataSource(dataSource)
+                .build();
+    }
+
+WATCH OUT !! itemSqlParameterSourceProvider(new BeanPropertyItemSqlParameterSourceProvider<>()) this line of code is SUPER IMPORTANT to map the values automatically from the fields 
+filled with the values to the item which we are writing
+
+now there is other types of built-in readers and writers, but it's all the same shit : create pojo, establish link/connection to datasource, instantiate the reader/writer,
+you can create a customized one in a separate class, then call it in the step .reader/.writer (name); ....
+same with the processor, but for the processor there isn't much built-in processors to work with, mostly used are custom processors where you integrate the logic you want
+
+the only additional thing you might need to do is if you are processing a batch from a type to another, you should also make sure you hava a POJO for the ouptut type, unless
+it's a built-in type like int,String...
+the only built-ins that are common for processors are validation processors, and Composite processors(to run a chain of multiple processors)
+
+
+
+**************************************************************************************
+******************UPGRADING TO SPRING BATCH V.5***************************************
+**************************************************************************************
+
+- upgrade the spring boot and batch versions in the pom file
+
+-you'll have many errors, its' okay don't lose your shit, chill out and start by your config file ; remove the @EnableBatchProcessing and the 
+JobBuilder and the StepBuilder Factories, and replace them with StepBuilder and JobBuilder
+
+StepBuilder and JobBuilder ressmbles a little the the factory ones from v.4, but they have parameters, the jobRepository and transactionManager
+and add them to different places, example : 
+
+
+    @Bean
+    public Step step1(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
+        return new StepBuilder("chunkBasedStep1", jobRepository)
+                .<Product, Product>chunk(3,transactionManager)
+                .reader(itemReader())
+                .processor(myProcessor())
+                .writer(jdbcItemWriter())
+                .build();
+    }
+
+
+    @Bean
+    public Job firstJob(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
+        return new JobBuilder( "job1", jobRepository)
+                .start(step1(jobRepository,transactionManager))
+                .build();
+    }
+
+
+WATCH OUT FOR THE POM DEPENDANCIES !!! especially when having some bean injection errors for the datasource and launchers
+
+
+JOB FLOWS : that's when we create a flow having some steps, useful when we got a set of steps that we might use in different scenarios, example
+
+    @Bean
+    public Flow myFlow(Step step2, Step step3) {
+        return new FlowBuilder<Flow>("myFlow")
+                .start(step2) // Replace `null` with your JobRepository and TransactionManager beans if needed
+                .next(step3)
+                .build();
+    }
+
+and then implement it in the Job, but watch out the .next() don't work with flows, it's either on .start() or .on("Status").to(myFlow)
+
+also, it is importnat to speak about the step jobs, it's a way to chain jobs together, in this way, we:
+- declare and create a job
+- declare a step and create it,and inside the stepBuilder, call the job
+-implement the step that contains the job normally in the initial job
+example:
+
+    @Bean
+    public Job secondJob(JobRepository jobRepository, Step step4, PlatformTransactionManager transactionManager) {
+        return new JobBuilder("job2", jobRepository)
+                .start(step4)
+                .build();
+    }
+
+    @Bean
+    public Step jobStep(JobRepository jobRepository, Job secondJob) {
+        return new StepBuilder("jobStep", jobRepository)
+                .job(secondJob)
+                .build();
+    }
+
+example having a flow and step JOB implemented in the same job
+
+    @Bean
+    public Job firstJob(JobRepository jobRepository, Flow myFlow,Step step4,Step jobStep) {
+        return new JobBuilder( "job1", jobRepository)
+                .start(myFlow)
+                .next(step4)
+                .next(jobStep)
+                .end()
+                .build();
+    }
+
+Parallel flows : look i'm getting tired of dis shit, it's clear what it means, 2 flows at same time, you add a .split and then .add another flow example
+
+    @Bean
+    public Job firstJob(JobRepository jobRepository, Flow myFlow, Flow myFlow2, Step jobStep) {
+        return new JobBuilder( "job1", jobRepository)
+                .start(myFlow)
+                .split(new SimpleAsyncTaskExecutor()).add(myFlow2)
+                .next(jobStep)
+                .end()
+                .build();
+    }
+    
+ a good approach also is to create a flow and include in it multiple flows to split
